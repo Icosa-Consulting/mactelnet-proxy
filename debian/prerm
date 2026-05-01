@@ -1,0 +1,15 @@
+#!/bin/sh
+# prerm — runs before files are removed (or replaced on upgrade).
+# dh_installsystemd inserts the actual systemctl stop call via the
+# DEBHELPER token at the bottom of this script; this file is here
+# for any custom cleanup that needs to happen before files come out.
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure|failed-upgrade)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

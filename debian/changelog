@@ -1,0 +1,129 @@
+mactelnet-proxy (0.1.9) stable; urgency=low
+
+  * generalize deployment-specific examples in comments and Docker
+    defaults — Dockerfile MACTELNET_PROXY_KEYS_DIR default moved
+    from /config/auth (VyOS-flavored) to /etc/mactelnet-proxy so it
+    matches the systemd unit and the binary default. Comment
+    examples for MACTELNET_PROXY_INTERFACE switched from bond0 /
+    bond0.3006 to eth0 / eth1.
+  * Debian-package deploys are unaffected — the systemd unit pins
+    MACTELNET_PROXY_KEYS_DIR=/etc/mactelnet-proxy explicitly.
+    Docker users with a volume mounted at /config/auth need to
+    remount on /etc/mactelnet-proxy (or set
+    MACTELNET_PROXY_KEYS_DIR=/config/auth back via -e).
+
+ -- Icosa Consulting <build@icosa.consulting>  Fri, 01 May 2026 21:00:00 -0600
+
+mactelnet-proxy (0.1.8) stable; urgency=low
+
+  * default keys dir rebased: /etc/netcfg-mactelnet-proxy →
+    /etc/mactelnet-proxy. Matches what postinst has always created
+    and what the systemd unit sets via MACTELNET_PROXY_KEYS_DIR, so
+    no migration needed for package-installed deployments.
+  * default host-key filename renamed: ssh_host_ed25519_key →
+    mactel_ed25519_key. Existing installs upgraded in place will
+    auto-generate a new key on first start and present a fresh SSH
+    host fingerprint to clients — rename the old file to keep the
+    existing fingerprint:
+      mv /etc/mactelnet-proxy/ssh_host_ed25519_key \
+         /etc/mactelnet-proxy/mactel_ed25519_key
+
+ -- Icosa Consulting <build@icosa.consulting>  Fri, 01 May 2026 20:00:00 -0600
+
+mactelnet-proxy (0.1.7) stable; urgency=low
+
+  * service runs as root/root (the systemd default) instead of a
+    dedicated mactelnet user — the daemon needs CAP_NET_RAW +
+    PF_PACKET anyway, and User=mactelnet was tripping DAC on
+    operator-owned key paths (e.g. /config/auth on VyOS) without
+    actually shrinking the privilege surface. CapabilityBoundingSet
+    + Protect*/Restrict*/SystemCallFilter still meaningfully
+    constrain the root daemon.
+  * postinst no longer creates the mactelnet user/group; postrm no
+    longer deletes them. /etc/mactelnet-proxy is now installed
+    root:root 0700.
+  * vrf.conf drop-in simplified: no User= override needed, dropped
+    AmbientCapabilities (no-op for root). Still expands
+    CapabilityBoundingSet, relaxes SystemCallFilter, and sets
+    ProtectControlGroups=no for `ip vrf exec`'s cgroup mkdir.
+
+ -- Icosa Consulting <build@icosa.consulting>  Fri, 01 May 2026 19:00:00 -0600
+
+mactelnet-proxy (0.1.6) stable; urgency=low
+
+  * fix(vrf): drop-in now sets ProtectControlGroups=no — without it
+    the base unit's ProtectControlGroups=yes makes /sys/fs/cgroup
+    read-only, and `ip vrf exec` fails when it tries to mkdir a
+    sub-cgroup for its eBPF program ("Failed to setup vrf cgroup2
+    directory"). Filed under the same drop-in at
+    /usr/share/doc/mactelnet-proxy/examples/vrf.conf.
+
+ -- Icosa Consulting <build@icosa.consulting>  Fri, 01 May 2026 18:00:00 -0600
+
+mactelnet-proxy (0.1.5) stable; urgency=low
+
+  * fix(deb): drop literal #DEBHELPER# from postinst/prerm comments —
+    debhelper text-substitutes the token wherever it appears, including
+    inside comments, expanding into stray shell that broke `dpkg -i`
+    on 0.1.4 with a syntax error near `)`. Comments now reference
+    "DEBHELPER" without the surrounding hashes; the actual token at
+    the substitution point is preserved.
+  * add optional systemd drop-in example for running the proxy inside
+    a Linux VRF via `ip vrf exec ${VRF}` — shipped at
+    /usr/share/doc/mactelnet-proxy/examples/vrf.conf. Includes the
+    CAP_NET_ADMIN/CAP_SYS_ADMIN grants and SystemCallFilter relaxation
+    that ip(8)'s bpf/cgroup setup requires.
+
+ -- Icosa Consulting <build@icosa.consulting>  Fri, 01 May 2026 14:00:00 -0600
+
+mactelnet-proxy (0.1.4) stable; urgency=low
+
+  * binary reads MACTELNET_PROXY_* env vars directly; systemd
+    ExecStart and Docker ENTRYPOINT collapse to a single exec-form
+    line each — the /bin/sh -c '...${VAR:+-flag}...' kludge is gone
+  * env-var names prefixed MACTELNET_PROXY_ to avoid collisions
+    with stray shell vars; existing /etc/default/mactelnet-proxy
+    files need editing on upgrade
+
+ -- Icosa Consulting <build@icosa.consulting>  Thu, 01 May 2026 12:00:00 -0600
+
+mactelnet-proxy (0.1.3) stable; urgency=low
+
+  * env-var driven systemd unit (LISTEN, KEYS_DIR, MNDP_IFACE,
+    AUTH_TIMEOUT, DATA_TIMEOUT, DEBUG); EnvironmentFile under
+    /etc/default/ and /etc/sysconfig/ both honored
+  * IP header now byte-identical to RouterOS /tool mac-telnet
+    (TOS=0x00, no DF flag) — closes the only remaining wire-level
+    delta from the trusted reference flow
+
+ -- Icosa Consulting <build@icosa.consulting>  Thu, 01 May 2026 00:00:00 -0600
+
+mactelnet-proxy (0.1.2) stable; urgency=low
+
+  * L2 destination is the target's MAC, not broadcast — matches
+    upstream interfaces.c:net_send_udp; allows traversal of
+    intermediate L2 paths with broadcast suppression / hardware
+    MAC-rule filtering on UDP/20561
+
+ -- Icosa Consulting <build@icosa.consulting>  Thu, 01 May 2026 00:00:00 -0600
+
+mactelnet-proxy (0.1.1) stable; urgency=low
+
+  * add `ifaces` SSH-exec subcommand: lists host interfaces with
+    name, ifindex, MAC, MTU, flags, kind, vlan parent+vid, master,
+    operstate, IPv4/IPv6 addresses; -j for JSON output
+
+ -- Icosa Consulting <build@icosa.consulting>  Thu, 01 May 2026 00:00:00 -0600
+
+mactelnet-proxy (0.1.0) stable; urgency=low
+
+  * initial pre-release build
+  * MNDP discovery (UDP/5678) with TLV parser
+  * MAC-Telnet protocol (UDP/20561) — EC-SRP and MD5 auth, terminal
+    size negotiation, sequence/ACK retransmit, keepalive
+  * embedded SSH server (key-auth only) routing exec requests to
+    in-process mactelnet/mndp engines
+  * configurable retransmit budgets, raw L2 send via PF_PACKET so
+    src=0.0.0.0 actually lands on the wire
+
+ -- Icosa Consulting <build@icosa.consulting>  Thu, 01 May 2026 00:00:00 -0600

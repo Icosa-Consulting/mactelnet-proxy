@@ -1,0 +1,29 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mactelnet-proxy
+Source: https://github.com/icosa-consulting/mactelnet-proxy
+
+Files: *
+Copyright: 2026 Icosa Consulting Inc.
+License: GPL-2.0
+ Derivative work of MAC-Telnet (https://github.com/haakonnessjoen/MAC-Telnet)
+ by Håkon Nessjøen, also licensed under GPL-2.0. Protocol-port portions
+ in internal/mactelnet and internal/mndp are line-by-line ports of
+ upstream functions; non-protocol code (SSH server, CLI, deploy
+ scaffolding) is original.
+ .
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License version 2 as
+ published by the Free Software Foundation.
+ .
+ This package is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this package; if not, write to the Free Software
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301
+ USA.
+ .
+ On Debian systems, the complete text of the GNU General Public
+ License version 2 can be found in `/usr/share/common-licenses/GPL-2'.

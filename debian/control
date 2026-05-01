@@ -1,0 +1,30 @@
+Source: mactelnet-proxy
+Section: net
+Priority: optional
+Maintainer: Icosa Consulting Inc. <build@icosa.consulting>
+Build-Depends:
+ debhelper-compat (= 13),
+ golang-go (>= 2:1.25~)
+Standards-Version: 4.6.2
+Homepage: https://github.com/icosa-consulting/mactelnet-proxy
+Rules-Requires-Root: no
+
+Package: mactelnet-proxy
+Architecture: any
+Depends:
+ ${misc:Depends},
+ adduser,
+ systemd
+Description: SSH-fronted MAC-Telnet proxy for MikroTik devices
+ MAC-Telnet Proxy embeds an SSH server that accepts `exec` requests
+ (mactelnet -u USER MAC, mndp -j, ifaces) and routes them in-process
+ to MikroTik MAC-Telnet and MNDP protocol implementations.
+ .
+ The proxy is intended as a reachable endpoint between a network
+ management UI (NetCFG, etc.) and MikroTik devices that don't have
+ IP-level reachability — typically because they live on an L2-only
+ segment behind a router that doesn't route MAC-Telnet.
+ .
+ Configuration is via /etc/default/mactelnet-proxy (env vars). The
+ systemd unit is installed and enabled but not started — the operator
+ must set MNDP_IFACE before starting.

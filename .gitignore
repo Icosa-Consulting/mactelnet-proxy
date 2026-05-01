@@ -1,0 +1,25 @@
+bin/
+dist/
+*.test
+*.out
+*.pcap
+*.pcapng
+coverage.*
+.vscode/
+.idea/
+
+# dpkg-buildpackage build artifacts. The .deb / .buildinfo / .changes
+# land one directory above the source per dpkg convention; the rest
+# are scratch files debhelper drops into debian/ during the build.
+/mactelnet-proxy
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/mactelnet-proxy/
+debian/*.substvars
+debian/*.debhelper.log
+debian/*.debhelper
+
+# Local-only upstream-source mirror used as porting reference. Cloned
+# manually (see Makefile target `upstream`) and never built.
+_upstream/

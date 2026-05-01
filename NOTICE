@@ -1,0 +1,14 @@
+netcfg-mactelnet-proxy
+Copyright (C) 2026 Icosa Consulting Inc.
+
+This program is a Go port of MAC-Telnet, a C implementation by
+Håkon Nessjøen and contributors:
+
+    https://github.com/haakonnessjoen/MAC-Telnet
+    Copyright (C) 2010-2024 Håkon Nessjøen <haakon.nessjoen@gmail.com>
+    Licensed under the GNU General Public License v2
+
+The Go port preserves the algorithmic structure, packet formats, and
+operational semantics of the upstream C code. It is a derivative work
+distributed under the same terms (GPL-2.0). See LICENSE for the full
+license text.

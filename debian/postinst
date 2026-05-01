@@ -1,0 +1,32 @@
+#!/bin/sh
+# postinst — runs after files are unpacked.
+#
+# Ensures the config/keys directory exists with restrictive perms.
+# dh_installsystemd inserts its systemctl daemon-reload + enable code
+# via the DEBHELPER token at the bottom of this script.
+set -e
+
+case "$1" in
+    configure)
+        # Config dir holds the auto-generated host key + authorized_keys.
+        # 0700 keeps the keys inaccessible to anyone but root, which is
+        # the user the service runs as.
+        install -d -o root -g root -m 0700 /etc/mactelnet-proxy
+
+        # First-install hint. dh_installsystemd will enable the unit
+        # for us via the DEBHELPER block below; we don't auto-start
+        # because the proxy can't do anything useful until the
+        # operator sets MACTELNET_PROXY_INTERFACE.
+        if [ -z "$2" ]; then
+            echo "mactelnet-proxy: edit /etc/default/mactelnet-proxy to set MACTELNET_PROXY_INTERFACE,"
+            echo "                 then run: systemctl start mactelnet-proxy"
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

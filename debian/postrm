@@ -1,0 +1,21 @@
+#!/bin/sh
+# postrm — runs after files are removed.
+#   remove   = files gone, config preserved
+#   purge    = also remove config + system user
+#   upgrade  = continue normally
+set -e
+
+case "$1" in
+    purge)
+        # Keys generated on first run live under /etc/mactelnet-proxy
+        # — purge is the right time to clear them.
+        rm -rf /etc/mactelnet-proxy
+        ;;
+
+    remove|upgrade|deconfigure|abort-install|abort-upgrade|disappear|failed-upgrade)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

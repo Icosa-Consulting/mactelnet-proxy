@@ -1,0 +1,81 @@
+[Unit]
+Description=MAC-Telnet Proxy
+Documentation=https://github.com/icosa-consulting/mactelnet-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Configuration via environment variables — the binary reads each of
+# these directly via os.Getenv(); no shell substitution needed in the
+# unit. CLI flags still take precedence if specified.
+#
+#   MACTELNET_PROXY_LISTEN          address:port the embedded SSH server binds to
+#                                   (default 0.0.0.0:222 to avoid conflict with sshd)
+#   MACTELNET_PROXY_KEYS_DIR        directory holding mactel_ed25519_key
+#                                   + authorized_keys (default /etc/mactelnet-proxy;
+#                                   auto-generated on first run if missing)
+#   MACTELNET_PROXY_INTERFACE       L2-facing interface for mactelnet/mndp;
+#                                   REQUIRED for any actual mac-telnet/mndp
+#                                   traffic. The binary boots without it but
+#                                   rejects every exec.
+#   MACTELNET_PROXY_AUTH_TIMEOUT    total retransmit budget for the handshake
+#                                   (e.g. 10s, 30s). Empty = binary default (~10s).
+#   MACTELNET_PROXY_DATA_TIMEOUT    retransmit budget for in-session DATA packets
+#                                   (e.g. 2s). Empty = upstream default (~2.4s).
+#   MACTELNET_PROXY_DEBUG           non-empty (except 0/false/no/off) enables
+#                                   -debug verbose packet logging
+#
+# Edit /etc/default/mactelnet-proxy on Debian/Ubuntu, or
+# /etc/sysconfig/mactelnet-proxy on RHEL-family. The leading `-` makes
+# the file optional — the unit boots with sane defaults if it doesn't
+# exist.
+EnvironmentFile=-/config/user-data/mactelnet-proxy
+EnvironmentFile=-/etc/default/mactelnet-proxy
+Environment=MACTELNET_PROXY_LISTEN=0.0.0.0:222
+Environment=MACTELNET_PROXY_KEYS_DIR=/etc/mactelnet-proxy
+
+ExecStart=/usr/bin/mactelnet-proxy serve
+
+# SIGHUP → reload authorized_keys (live updates without a restart).
+# Keys appended to KEYS_DIR/authorized_keys are picked up immediately.
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5
+
+# CapabilityBoundingSet caps what root can hold to the two the proxy
+# actually needs: CAP_NET_RAW (AF_PACKET / SOCK_RAW for MAC-Telnet
+# outbound, broadcast UDP/20561 listener) and CAP_NET_BIND_SERVICE
+# (privileged-port LISTEN if operator drops below 1024).
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# Hardening — the proxy never writes outside KEYS_DIR, never opens
+# files in /home, never needs raw devices, never spawns help binaries.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# AF_PACKET is the SOCK_RAW family the proxy uses for L2 transmission;
+# AF_NETLINK is for Go's net package interface enumeration; AF_UNIX is
+# for systemd's notify socket if Type=notify is ever switched on.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_PACKET AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# KEYS_DIR is writable so first-run host-key + authorized_keys-stub
+# generation succeeds. Override via drop-in if KEYS_DIR moves.
+ReadWritePaths=/etc/mactelnet-proxy
+
+[Install]
+WantedBy=multi-user.target

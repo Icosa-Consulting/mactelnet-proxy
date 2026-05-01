@@ -1,0 +1,85 @@
+#!/usr/bin/make -f
+#
+# Debian build rules for mactelnet-proxy.
+#
+# Cross-arch builds work natively because Go cross-compiles without a
+# C toolchain (CGO_ENABLED=0). Set DEB_HOST_ARCH at dpkg-buildpackage
+# time and the rules pick the right GOARCH/GOARM:
+#
+#   dpkg-buildpackage -b -uc -us                          # host arch
+#   dpkg-buildpackage -b -uc -us --host-arch=arm64        # cross to arm64
+#   dpkg-buildpackage -b -uc -us --host-arch=armhf        # cross to armhf
+#
+# The version stamped into the binary (`mactelnet-proxy version`)
+# comes from the changelog so package and binary version match.
+
+DH_VERBOSE = 1
+
+include /usr/share/dpkg/architecture.mk
+include /usr/share/dpkg/pkg-info.mk
+
+# Locate the Go toolchain — same logic as the project's top-level
+# Makefile so this rules file works on dev hosts where Go isn't on
+# PATH but lives at /usr/lib/go-*/bin/go (Debian/Ubuntu golang-1.NN
+# package layout). On a proper build host with the `golang-go`
+# binary package installed, `command -v go` finds /usr/bin/go and
+# this falls through to that.
+GO ?= $(or $(shell command -v go 2>/dev/null),$(lastword $(sort $(wildcard /usr/lib/go-*/bin/go))))
+
+# Map dpkg arch → Go GOARCH/GOARM. Anything we don't recognise falls
+# through to the dpkg-arch name; that'll fail loudly at `go build` if
+# it doesn't match a Go-supported target.
+ifeq ($(DEB_HOST_ARCH),amd64)
+GOARCH := amd64
+else ifeq ($(DEB_HOST_ARCH),arm64)
+GOARCH := arm64
+else ifeq ($(DEB_HOST_ARCH),armhf)
+GOARCH := arm
+GOARM  := 7
+else ifeq ($(DEB_HOST_ARCH),i386)
+GOARCH := 386
+else
+GOARCH := $(DEB_HOST_ARCH)
+endif
+
+PKG_VERSION := $(DEB_VERSION_UPSTREAM)
+GO_LDFLAGS  := -s -w -buildid= -X main.version=v$(PKG_VERSION)
+
+# Don't trip dh_dwz / dh_strip on a Go binary — those aren't useful
+# and dh_strip with debugedit can corrupt Go's stripped binaries.
+export DEB_BUILD_OPTIONS += nostrip
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) $(if $(GOARM),GOARM=$(GOARM)) \
+	GOFLAGS="-trimpath" \
+	$(GO) build -C src -ldflags '$(GO_LDFLAGS)' \
+		-o ../mactelnet-proxy ./cmd/mactelnet-proxy
+
+override_dh_auto_test:
+	# Run unit tests against the native arch only — cross-built tests
+	# can't execute under a foreign GOARCH on this host.
+	@if [ "$(DEB_HOST_ARCH)" = "$(DEB_BUILD_ARCH)" ]; then \
+		$(GO) test -C src ./...; \
+	else \
+		echo "skipping go test (cross-build $(DEB_HOST_ARCH) on $(DEB_BUILD_ARCH))"; \
+	fi
+
+override_dh_auto_install:
+	install -D -m 0755 mactelnet-proxy \
+	    debian/mactelnet-proxy/usr/bin/mactelnet-proxy
+	install -D -m 0644 deploy/systemd/mactelnet-proxy.env.example \
+	    debian/mactelnet-proxy/etc/default/mactelnet-proxy
+	install -d -m 0755 \
+	    debian/mactelnet-proxy/etc/mactelnet-proxy
+
+override_dh_auto_clean:
+	rm -f mactelnet-proxy
+
+# dh_installsystemd handles the unit but with --no-start so the
+# package install doesn't try to bring up the proxy before the
+# operator has set MNDP_IFACE.
+override_dh_installsystemd:
+	dh_installsystemd --no-start

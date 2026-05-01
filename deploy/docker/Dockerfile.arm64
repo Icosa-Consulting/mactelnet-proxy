@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+# check=skip=SecretsUsedInArgOrEnv
+#
+# Multi-stage build for mactelnet-proxy — linux/arm64 target.
+# Suits Raspberry Pi 4/5 (64-bit OS), AWS Graviton, Apple Silicon hosts,
+# and any other 64-bit ARMv8 Linux runtime.
+#
+# Final image is `alpine` (~15 MB total) so the entrypoint can be a
+# shell that expands ENV vars into the binary's flags. Build stage uses
+# the host's native arch (--platform=$BUILDPLATFORM) and cross-compiles
+# the Go binary; CGO_ENABLED=0 means no C toolchain is needed.
+#
+# Run with --cap-add=NET_RAW --network=host (the proxy needs raw L2
+# access on the host's network). Configuration is via env vars; see the
+# ENTRYPOINT block below.
+
+ARG GO_VERSION=1.25
+ARG ALPINE_VERSION=3.20
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+WORKDIR /build
+COPY src/go.mod src/go.sum* ./
+RUN go mod download
+COPY src/ ./
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -trimpath \
+    -ldflags "-s -w -buildid= -X main.version=${VERSION}" \
+    -o /out/mactelnet-proxy \
+    ./cmd/mactelnet-proxy
+
+FROM alpine:${ALPINE_VERSION}
+COPY --from=build /out/mactelnet-proxy /usr/local/bin/mactelnet-proxy
+
+# Configuration via environment variables — the binary reads each of
+# these directly via os.Getenv(); no shell substitution in the
+# entrypoint. Override at run time with `docker run -e
+# MACTELNET_PROXY_INTERFACE=eth0 ...`.
+#
+#   MACTELNET_PROXY_KEYS_DIR        directory holding the host key + authorized_keys
+#   MACTELNET_PROXY_LISTEN          address:port the embedded SSH server binds to
+#   MACTELNET_PROXY_INTERFACE       L2-facing interface for mactelnet/mndp;
+#                                   required, no safe default. Empty means the
+#                                   binary refuses to do anything useful at exec.
+#   MACTELNET_PROXY_AUTH_TIMEOUT    handshake retransmit budget (empty = ~10s)
+#   MACTELNET_PROXY_DATA_TIMEOUT    in-session retransmit budget (empty = ~2.4s)
+#   MACTELNET_PROXY_DEBUG           non-empty (except 0/false/no/off) enables
+#                                   verbose packet-level logging
+ENV MACTELNET_PROXY_KEYS_DIR=/etc/mactelnet-proxy \
+    MACTELNET_PROXY_LISTEN=0.0.0.0:222
+
+# Exec-form entrypoint: PID 1 is the proxy itself, signals reach it
+# directly, no shell PID in the way.
+ENTRYPOINT ["/usr/local/bin/mactelnet-proxy", "serve"]

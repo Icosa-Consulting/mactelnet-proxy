@@ -82,6 +82,7 @@ path automatically.
 | `MACTELNET_PROXY_INTERFACE`       | _(empty)_                       | **Required** for MAC-Telnet/MNDP traffic. Pick the interface on the same broadcast domain as your MikroTiks (often a VLAN sub-interface, e.g. `eth0.20`). |
 | `MACTELNET_PROXY_LISTEN`          | `0.0.0.0:222`                   | Address:port the SSH server binds to.                                                                                                                     |
 | `MACTELNET_PROXY_KEYS_DIR`        | `/etc/mactelnet-proxy`          | Holds the host key and `authorized_keys` (auto-generated on first run).                                                                                   |
+| `MACTELNET_PROXY_VLAN`            | `0` _(untagged)_                | 802.1Q VLAN ID (1–4094) for emitted/accepted frames. Set when running inside a RouterOS container whose veth sits on a `vlan-filtering=yes` bridge — RouterOS won't pass a VLAN sub-interface into the container, so the proxy must tag itself. See [Run inside a RouterOS container](#run-inside-a-routeros-container). |
 | `MACTELNET_PROXY_AUTH_TIMEOUT`    | `10s`                           | Retransmit budget for the pre-END_AUTH handshake. Bump on flaky links.                                                                                    |
 | `MACTELNET_PROXY_DATA_TIMEOUT`    | _(upstream default ~2.4s)_      | Retransmit budget for in-session DATA packets.                                                                                                            |
 | `MACTELNET_PROXY_DEBUG`           | _(off)_                         | Any non-empty value (except `0`/`false`/`no`/`off`) enables verbose packet-level logging.                                                                 |
@@ -111,6 +112,72 @@ sudo systemctl restart mactelnet-proxy
 The drop-in expands `CapabilityBoundingSet` and relaxes
 `SystemCallFilter`/`ProtectControlGroups` just enough for `ip vrf exec`'s
 bpf/cgroup setup; the rest of the unit's hardening still applies.
+
+## Run inside a RouterOS container
+
+The proxy can run as a container directly on a MikroTik device with
+the RouterOS `container` package. Verified on **RB5009 (arm64) running
+RouterOS 7.21.4**; arm32v5 (EN7562CT chips like hEX Refresh) is
+not supported because the existing armhf build targets ARMv7. See
+[`docs/MIKROTIK-CONTAINER-RESEARCH.md`](docs/MIKROTIK-CONTAINER-RESEARCH.md)
+for the full reference.
+
+What works without modification:
+
+- `AF_PACKET` raw sockets (the proxy gets `CAP_NET_RAW` in the default
+  container effective set — no `--cap-add` flag exists, but none is
+  needed).
+- Broadcast UDP for MNDP discovery on a bridged-veth.
+- Single-stage Alpine arm64 images load directly via
+  `docker save` → `/container/add file=…`. No skopeo conversion needed.
+
+The one quirk that drove the `MACTELNET_PROXY_VLAN` knob: RouterOS
+**only exposes veth-type interfaces inside the container's network
+namespace.** It will not pass in a VLAN sub-interface, a bridge, or a
+physical interface — so when the container's veth sits on a bridge with
+`vlan-filtering=yes`, you can't follow the usual Linux pattern of
+`ip link add link veth1 name veth1.20 type vlan id 20` and binding to
+`veth1.20`. The kernel inside the container has no VLAN sub-interface
+to demux tagged frames through, and a regular UDP socket never sees the
+inner UDP datagrams. Application-side 802.1Q is the only path:
+
+```
+MACTELNET_PROXY_INTERFACE=eth0
+MACTELNET_PROXY_VLAN=20
+```
+
+The proxy then inserts/parses the 4-byte 802.1Q header itself, on both
+send and receive, via an `AF_PACKET` reader that does its own
+Ethernet/IP/UDP parse. No tag is added when `MACTELNET_PROXY_VLAN=0`
+(or unset) — the legacy untagged path is unchanged.
+
+A short quickstart for cutting a deb-free in-container deployment:
+
+```sh
+# Off-device — build and save the arm64 image
+docker buildx build --platform linux/arm64 \
+    --output=type=docker -t mactelnet-proxy:latest .
+docker save mactelnet-proxy:latest -o proxy.tar
+# upload proxy.tar to the device under disk1/
+
+# On RouterOS — minimal env list and run
+/container/envs/add list=mtp name=MACTELNET_PROXY_INTERFACE value=eth0
+/container/envs/add list=mtp name=MACTELNET_PROXY_VLAN      value=20
+/container/envs/add list=mtp name=MACTELNET_PROXY_LISTEN    value=0.0.0.0:222
+/container/mounts/add name=mtp-keys src=disk1/proxy/keys dst=/etc/mactelnet-proxy
+/container/add file=disk1/proxy.tar interface=veth1 envlist=mtp mountlists=mtp-keys
+/container/start <container-id>
+```
+
+Add `dstnat` for inbound :222 and (optionally) a firewall rule for the
+listening side; the `EXPOSE` directive in the image is ignored on
+RouterOS, same as everywhere else outside Docker proper.
+
+If you want the proxy's own diagnostic toolchain inside the container
+(`strace`, `tcpdump`, `iproute2`, etc) for `/container/shell` triage,
+uncomment the relevant `RUN apk add` block in
+[`deploy/docker/Dockerfile.arm64`](deploy/docker/Dockerfile.arm64) — it's
+shipped commented-out so production builds stay lean.
 
 ## Build from source
 

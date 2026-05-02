@@ -62,11 +62,12 @@ type controlPacket struct {
 // be called concurrently from different goroutines; multiple concurrent
 // Writes are serialized internally.
 type Session struct {
-	// conn is the receive socket — UDP/20561 on 0.0.0.0, accepts the
-	// device's broadcast replies. The sender side uses sender (a raw
-	// IP_HDRINCL socket) so we can put src=0.0.0.0/dst=255.255.255.255
-	// on the wire the way upstream mactelnet-client does.
-	conn   *net.UDPConn
+	// conn is the receive socket. For untagged sessions it's a
+	// *net.UDPConn bound to 0.0.0.0:20561; for VLAN-tagged sessions
+	// it's a *rawReceiver wrapping AF_PACKET — both implementations
+	// satisfy the rxConn interface and the rest of the protocol code
+	// is agnostic to which is in use.
+	conn   rxConn
 	sender *rawSender
 
 	srcMAC     [6]byte
@@ -111,10 +112,17 @@ type Session struct {
 // auto-discovery is not supported. cols/rows are the initial terminal
 // dimensions; pass zeros if unknown.
 //
+// vlanID, if non-zero, makes the proxy emit and accept 802.1Q-tagged
+// frames with that VID. Required when the proxy interface sits on a
+// RouterOS bridge configured for vlan-filtering / tagged-only access
+// (RouterOS has no Linux VLAN sub-interface concept, so the kernel
+// can't tag for us — the proxy has to do it itself). Zero means
+// untagged, the historical behaviour.
+//
 // On success the returned Session is ready for terminal traffic via
 // Read/Write. On failure all resources are released before returning.
 func Open(ctx context.Context, iface, mac, username, password string,
-	cols, rows uint16,
+	cols, rows, vlanID uint16,
 ) (*Session, error) {
 	dst, err := parseMAC(mac)
 	if err != nil {
@@ -125,7 +133,7 @@ func Open(ctx context.Context, iface, mac, username, password string,
 		return nil, err
 	}
 
-	conn, sender, err := openSockets(netIface)
+	conn, sender, err := openSockets(netIface, vlanID)
 	if err != nil {
 		return nil, err
 	}

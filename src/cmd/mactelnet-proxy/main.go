@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -109,6 +110,10 @@ func runServe(args []string) int {
 	iface := fs.String("interface",
 		envOr("MACTELNET_PROXY_INTERFACE", ""),
 		"network interface to bind for L2 traffic, empty = system default (env: MACTELNET_PROXY_INTERFACE)")
+	vlanID := fs.Uint("vlan",
+		envUintOr("MACTELNET_PROXY_VLAN", 0),
+		"default 802.1Q VLAN ID (1–4094) for emitted/accepted mac-telnet frames; "+
+			"0 = untagged. (env: MACTELNET_PROXY_VLAN)")
 	authTimeout := fs.Duration("auth-timeout",
 		envDurationOr("MACTELNET_PROXY_AUTH_TIMEOUT", 10*time.Second),
 		"total retransmit budget for the pre-END_AUTH MAC-Telnet handshake, e.g. 10s; 0 = upstream default ~2.4s (env: MACTELNET_PROXY_AUTH_TIMEOUT)")
@@ -134,6 +139,10 @@ func runServe(args []string) int {
 	if *authKeys == "" {
 		*authKeys = filepath.Join(*keysDir, defaultAuthorizedKeysName)
 	}
+	if *vlanID > 4094 {
+		fmt.Fprintf(os.Stderr, "mactelnet-proxy: invalid -vlan %d (must be 0–4094)\n", *vlanID)
+		return 2
+	}
 	mactelnet.Configure(*authTimeout, *dataTimeout)
 
 	level := slog.LevelInfo
@@ -156,6 +165,7 @@ func runServe(args []string) int {
 		"authorized_keys", *authKeys,
 		"host_key", *hostKey,
 		"interface", *iface,
+		"vlan", *vlanID,
 		"auth_timeout", *authTimeout,
 		"data_timeout", *dataTimeout,
 		"debug", *debug)
@@ -167,6 +177,7 @@ func runServe(args []string) int {
 		HostKeyPath:    *hostKey,
 		AuthorizedKeys: *authKeys,
 		Iface:          *iface,
+		VlanID:         uint16(*vlanID),
 		Logger:         logger,
 	})
 	if err != nil {
@@ -229,6 +240,25 @@ func envDurationOr(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// envUintOr parses os.Getenv(name) as an unsigned integer. Returns
+// fallback on unset/empty/unparseable; emits a warning on parse failure.
+// Used for numeric flags like VLAN ID where an empty value is fine and
+// a malformed one should be obvious.
+func envUintOr(name string, fallback uint) uint {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"mactelnet-proxy: ignoring invalid uint in %s=%q (%v); using default %d\n",
+			name, v, err, fallback)
+		return fallback
+	}
+	return uint(n)
 }
 
 // envBoolOr returns false for the canonical "off" values

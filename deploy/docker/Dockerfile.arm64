@@ -32,6 +32,21 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 FROM alpine:${ALPINE_VERSION}
 COPY --from=build /out/mactelnet-proxy /usr/local/bin/mactelnet-proxy
 
+# ── Diagnostic tools ───────────────────────────────────────────────────────────
+# In-container shell tools for poking at the network stack, especially when
+# triaging RouterOS-container quirks (e.g. confirming AF_PACKET capability
+# denial via `strace -e socket /usr/local/bin/mactelnet-proxy serve`).
+# Adds ~8 MB to the image. Strip this RUN layer for a lean production build.
+#
+#   strace          — trace syscalls; primary tool for "which call is EPERMing"
+#   tcpdump         — packet capture on the container's veth
+#   netcat-openbsd  — `nc` for ad-hoc TCP/UDP probing
+#   lsof            — verify what sockets/FDs the proxy actually opens
+#   mtr             — path tracing
+
+#RUN apk update
+#RUN apk add --no-cache strace tcpdump netcat-openbsd lsof mtr
+
 # Configuration via environment variables — the binary reads each of
 # these directly via os.Getenv(); no shell substitution in the
 # entrypoint. Override at run time with `docker run -e

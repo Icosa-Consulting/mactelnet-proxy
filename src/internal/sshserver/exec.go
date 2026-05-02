@@ -179,9 +179,12 @@ func (s *Server) execMactelnet(
 	user := fs.String("u", "", "username (required)")
 	pass := fs.String("p", "", "password (prompted on stdin if omitted)")
 	iface := fs.String("i", s.cfg.Iface, "L2-facing interface (defaults to server config)")
+	vlanID := fs.Uint("vlan", uint(s.cfg.VlanID),
+		"802.1Q VLAN ID (1–4094) for emitted frames; 0 = untagged "+
+			"(defaults to server config)")
 
 	fs.Usage = func() {
-		fmt.Fprintln(ch.Stderr(), "usage: mactelnet -u USER [-p PASS] [-i IFACE] MAC")
+		fmt.Fprintln(ch.Stderr(), "usage: mactelnet -u USER [-p PASS] [-i IFACE] [-vlan VID] MAC")
 		fs.PrintDefaults()
 	}
 
@@ -193,6 +196,11 @@ func (s *Server) execMactelnet(
 		s.logger.Warn("mactelnet: missing required arg",
 			"user_set", *user != "", "iface_set", *iface != "", "positional", fs.NArg())
 		fs.Usage()
+		return 2
+	}
+	if *vlanID > 4094 {
+		s.logger.Warn("mactelnet: invalid -vlan value", "vlan", *vlanID)
+		fmt.Fprintln(ch.Stderr(), "mactelnet: -vlan must be in 1..4094 (or 0 for untagged)")
 		return 2
 	}
 
@@ -228,7 +236,7 @@ func (s *Server) execMactelnet(
 		s.logger.Info("mactelnet: password supplied via -p flag", "len", len(password))
 	}
 
-	sess, err := mactelnet.Open(ctx, *iface, mac, *user, password, uint16(cols), uint16(rows))
+	sess, err := mactelnet.Open(ctx, *iface, mac, *user, password, uint16(cols), uint16(rows), uint16(*vlanID))
 	if err != nil {
 		s.logger.Warn("mactelnet: open failed",
 			"iface", *iface, "user", *user, "mac", mac, "err", err)

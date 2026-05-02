@@ -6,11 +6,15 @@ package mactelnet
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // Net helpers for the MAC-Telnet client.
@@ -60,15 +64,44 @@ func resolveInterface(name string) (*net.Interface, error) {
 	return iface, nil
 }
 
-// openSockets opens the receive UDP socket and the raw L2 send socket
-// for one MAC-Telnet session. iface supplies both the Linux ifindex
-// (egress selector) and the source MAC put into the Ethernet header.
-func openSockets(iface *net.Interface) (*net.UDPConn, *rawSender, error) {
-	recv, err := openRecv()
+// rxConn is the read side of one MAC-Telnet session. Two implementations:
+//
+//   *udpRxConn   — wraps net.UDPConn, used when vlanID == 0. The kernel's
+//                  IP/UDP demux delivers payload-only bytes; cheapest path
+//                  and untouched by the VLAN refactor.
+//   *rawReceiver — wraps an AF_PACKET fd bound to a single interface, used
+//                  when vlanID > 0. Reads full Ethernet frames, parses the
+//                  802.1Q tag, filters by the configured VLAN ID, then
+//                  parses IP+UDP and returns the UDP payload — the same
+//                  bytes the UDP path would have returned.
+//
+// rxLoop only sees this interface; the rest of the protocol code is
+// unchanged regardless of which receiver is in use.
+type rxConn interface {
+	Read(buf []byte) (int, error)
+	SetReadDeadline(t time.Time) error
+	Close() error
+}
+
+// openSockets opens the receive socket and the raw L2 send socket for
+// one MAC-Telnet session. iface supplies both the Linux ifindex (egress
+// selector) and the source MAC put into the Ethernet header. vlanID > 0
+// switches the receive path from net.UDPConn to AF_PACKET so 802.1Q
+// tags can be parsed/filtered by the proxy itself.
+func openSockets(iface *net.Interface, vlanID uint16) (rxConn, *rawSender, error) {
+	var (
+		recv rxConn
+		err  error
+	)
+	if vlanID != 0 {
+		recv, err = openRawReceiver(iface, vlanID)
+	} else {
+		recv, err = openRecv()
+	}
 	if err != nil {
 		return nil, nil, err
 	}
-	sender, err := openRawSender(iface)
+	sender, err := openRawSender(iface, vlanID)
 	if err != nil {
 		recv.Close()
 		return nil, nil, err
@@ -128,6 +161,20 @@ type rawSender struct {
 	srcMAC  [6]byte
 	ipID    uint16
 
+	// vlanID is the 802.1Q VLAN identifier (1–4094) inserted into every
+	// outbound Ethernet frame. Zero means "no tag" — the frame leaves
+	// the wire as a plain Ethernet/IP frame, identical to the pre-VLAN
+	// behaviour. Non-zero adds a 4-byte 802.1Q header (TPID 0x8100 +
+	// TCI=vlanID) between the source MAC and the original EtherType.
+	//
+	// Used in deployments where the proxy's interface (typically a
+	// veth into a RouterOS bridge with vlan-filtering or
+	// frame-types=admit-only-vlan-tagged) requires tagged frames at
+	// the link layer; the kernel won't tag for us because RouterOS has
+	// no Linux VLAN sub-interfaces and we can't synthesize one inside
+	// the container without CAP_NET_ADMIN.
+	vlanID uint16
+
 	// sendErrCount counts non-nil sendto() returns. We log the first
 	// failure at WARN (so EPERM in a restricted runtime becomes visible
 	// without a debug flag) and every Nth thereafter at DEBUG to avoid
@@ -142,15 +189,25 @@ func htons(v uint16) uint16 { return (v<<8)&0xff00 | (v>>8)&0xff }
 // here avoids depending on golang.org/x/sys/unix for one constant.
 const ethPIP = 0x0800
 
+// ethP8021Q is the TPID (Tag Protocol Identifier) for 802.1Q VLAN tags
+// (0x8100). When a frame is tagged, this 16-bit value sits where the
+// EtherType normally would, followed by a 16-bit TCI and then the real
+// EtherType. We don't use Q-in-Q (0x88a8) — single tag is enough for
+// the RouterOS bridge use case.
+const ethP8021Q = 0x8100
+
 // openRawSender opens a PF_PACKET / SOCK_RAW socket scoped to one
 // interface. The protocol filter is ETH_P_IP because we only emit IPv4
 // frames; receive of broadcast replies stays on the regular UDP socket.
-func openRawSender(iface *net.Interface) (*rawSender, error) {
+//
+// vlanID, if non-zero, is the 802.1Q VLAN identifier inserted into
+// every outbound frame; zero means untagged (legacy behaviour).
+func openRawSender(iface *net.Interface, vlanID uint16) (*rawSender, error) {
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPIP)))
 	if err != nil {
 		return nil, fmt.Errorf("mactelnet: AF_PACKET SOCK_RAW: %w", err)
 	}
-	r := &rawSender{fd: fd, ifindex: iface.Index}
+	r := &rawSender{fd: fd, ifindex: iface.Index, vlanID: vlanID}
 	copy(r.srcMAC[:], iface.HardwareAddr)
 	return r, nil
 }
@@ -176,9 +233,16 @@ func openRawSender(iface *net.Interface) (*rawSender, error) {
 //   - ENXIO:    interface ifindex no longer exists (renamed/removed).
 func (r *rawSender) Send(payload []byte, dstMAC [6]byte) error {
 	r.ipID++ // monotonically-increasing IP ID per upstream convention
-	pkt := buildFrame(r.srcMAC, dstMAC, r.ipID, payload)
+	pkt := buildFrame(r.srcMAC, dstMAC, r.vlanID, r.ipID, payload)
+	// SockaddrLinklayer.Protocol is the *outer* EtherType the kernel
+	// uses to dispatch the frame; tagged frames present 0x8100 to the
+	// wire, untagged frames present 0x0800.
+	outerEth := uint16(ethPIP)
+	if r.vlanID != 0 {
+		outerEth = ethP8021Q
+	}
 	addr := &syscall.SockaddrLinklayer{
-		Protocol: htons(ethPIP),
+		Protocol: htons(outerEth),
 		Ifindex:  r.ifindex,
 		Halen:    6,
 	}
@@ -204,32 +268,224 @@ func (r *rawSender) Close() error {
 	return syscall.Close(r.fd)
 }
 
-// buildFrame lays out the 14-byte Ethernet + 20-byte IP + 8-byte UDP
+// rawReceiver is the AF_PACKET-based read side used when the proxy is
+// configured with a non-zero VLAN ID. RouterOS doesn't expose Linux VLAN
+// sub-interfaces, so the kernel never strips the 802.1Q tag from frames
+// arriving on our veth — a regular UDP/20561 socket would never see the
+// inner UDP datagrams. We therefore read full Ethernet frames, parse the
+// 802.1Q tag, filter by VID, then parse IP+UDP and return the UDP
+// payload (which is what the rest of the rxLoop expects).
+type rawReceiver struct {
+	fd        int
+	vlanID    uint16
+	srcMAC    [6]byte // our own MAC — used to drop frames we sent
+	closeOnce sync.Once
+	closed    atomic.Bool
+}
+
+// openRawReceiver opens a PF_PACKET / SOCK_RAW socket bound to iface.
+// We bind to ETH_P_ALL (passes both 0x8100 tagged and 0x0800 untagged
+// frames to userspace) and filter by VLAN ID + dst MAC + UDP port in
+// software — the BPF gain isn't worth the engine here on a low-traffic
+// veth.
+func openRawReceiver(iface *net.Interface, vlanID uint16) (*rawReceiver, error) {
+	const ethPALL = 0x0003 // ETH_P_ALL — see linux/if_ether.h
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPALL)))
+	if err != nil {
+		return nil, fmt.Errorf("mactelnet: AF_PACKET SOCK_RAW (recv): %w", err)
+	}
+	addr := &syscall.SockaddrLinklayer{
+		Protocol: htons(ethPALL),
+		Ifindex:  iface.Index,
+	}
+	if err := syscall.Bind(fd, addr); err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("mactelnet: bind AF_PACKET to %s: %w", iface.Name, err)
+	}
+	r := &rawReceiver{fd: fd, vlanID: vlanID}
+	copy(r.srcMAC[:], iface.HardwareAddr)
+	return r, nil
+}
+
+// Read fills buf with the UDP payload of the next mac-telnet frame
+// arriving on the bound interface. Frames not matching our VLAN, not
+// addressed to our MAC (ignoring our own outbound copies), or not a
+// UDP datagram on port udpPort are silently dropped and the loop
+// continues until either a real frame matches, the read deadline
+// fires, or the socket is closed.
+//
+// Behaviour mirrors net.UDPConn.Read for the caller: returns (n, nil)
+// on a delivered payload; (0, os.ErrDeadlineExceeded) when the recv
+// timeout fires; (0, net.ErrClosed) after Close().
+func (r *rawReceiver) Read(buf []byte) (int, error) {
+	frame := make([]byte, 2048)
+	for {
+		if r.closed.Load() {
+			return 0, net.ErrClosed
+		}
+		n, _, err := syscall.Recvfrom(r.fd, frame, 0)
+		if err != nil {
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+				return 0, os.ErrDeadlineExceeded
+			}
+			if r.closed.Load() {
+				return 0, net.ErrClosed
+			}
+			return 0, err
+		}
+		if n < 14 {
+			continue // runt frame
+		}
+		// Drop our own outbound frames — AF_PACKET on the bound
+		// interface receives both directions of traffic by default.
+		var srcMAC [6]byte
+		copy(srcMAC[:], frame[6:12])
+		if srcMAC == r.srcMAC {
+			continue
+		}
+		// Only accept frames addressed to us (unicast) or broadcast.
+		var dstMAC [6]byte
+		copy(dstMAC[:], frame[0:6])
+		if dstMAC != r.srcMAC && dstMAC != [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} {
+			continue
+		}
+
+		off := 14
+		etherType := binary.BigEndian.Uint16(frame[12:14])
+		// 802.1Q tagged: TPID + TCI + inner EtherType. We require the
+		// VID to match the configured VLAN — anything else is somebody
+		// else's tagged traffic.
+		if etherType == ethP8021Q {
+			if n < off+4 {
+				continue
+			}
+			tci := binary.BigEndian.Uint16(frame[off : off+2])
+			if tci&0x0fff != r.vlanID {
+				continue
+			}
+			etherType = binary.BigEndian.Uint16(frame[off+2 : off+4])
+			off += 4
+		} else {
+			// Untagged frame on a VLAN-aware receiver — drop. RouterOS
+			// bridges with frame-types=admit-only-vlan-tagged on the
+			// veth port shouldn't deliver any here, but be defensive.
+			continue
+		}
+		if etherType != ethPIP {
+			continue
+		}
+
+		// Minimal IP header parse: must be IPv4, at least 20 bytes,
+		// protocol == UDP. We don't validate the IP checksum — the
+		// kernel already did that for normal traffic, and tagged-frame
+		// receivers (us) will at worst process a corrupt frame whose
+		// UDP/MAC-Telnet layer also fails its own validation.
+		if n < off+20 {
+			continue
+		}
+		ipHdr := frame[off:]
+		if ipHdr[0]>>4 != 4 {
+			continue
+		}
+		ihl := int(ipHdr[0]&0x0f) * 4
+		if ihl < 20 || n < off+ihl {
+			continue
+		}
+		if ipHdr[9] != 17 { // protocol = UDP
+			continue
+		}
+		udpOff := off + ihl
+		if n < udpOff+8 {
+			continue
+		}
+		udp := frame[udpOff:]
+		dstPort := binary.BigEndian.Uint16(udp[2:4])
+		if dstPort != udpPort {
+			continue
+		}
+		udpLen := int(binary.BigEndian.Uint16(udp[4:6]))
+		if udpLen < 8 || udpOff+udpLen > n {
+			continue
+		}
+		payload := frame[udpOff+8 : udpOff+udpLen]
+		copied := copy(buf, payload)
+		return copied, nil
+	}
+}
+
+// SetReadDeadline configures SO_RCVTIMEO on the raw fd. The rxLoop sets
+// a short deadline (~500ms) so it can periodically check ctx without
+// blocking forever in Recvfrom. A zero time clears the timeout.
+func (r *rawReceiver) SetReadDeadline(t time.Time) error {
+	var tv syscall.Timeval
+	if t.IsZero() {
+		tv = syscall.Timeval{}
+	} else {
+		d := time.Until(t)
+		if d < 0 {
+			d = time.Microsecond
+		}
+		tv = syscall.NsecToTimeval(d.Nanoseconds())
+	}
+	return syscall.SetsockoptTimeval(r.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+}
+
+// Close releases the raw fd. Idempotent and safe from any goroutine.
+func (r *rawReceiver) Close() error {
+	var err error
+	r.closeOnce.Do(func() {
+		r.closed.Store(true)
+		err = syscall.Close(r.fd)
+	})
+	return err
+}
+
+// buildFrame lays out the Ethernet + (optional 802.1Q tag) + IP + UDP
 // header followed by the MAC-Telnet payload. L2 dst is the supplied
 // target MAC (L2 unicast — see Send for the rationale); IP dst stays
 // 255.255.255.255 to match upstream's RouterOS-tested wire format.
 // IP and UDP checksums are computed here because PF_PACKET emits the
 // bytes verbatim — the kernel never touches them.
-func buildFrame(srcMAC, dstMAC [6]byte, ipID uint16, payload []byte) []byte {
+//
+// vlanID > 0 inserts a 4-byte 802.1Q tag (TPID 0x8100, TCI = vlanID
+// with PCP=0, DEI=0) between the source MAC and the EtherType. The
+// resulting frame is 4 bytes longer; offsets to IP/UDP shift accordingly.
+func buildFrame(srcMAC, dstMAC [6]byte, vlanID, ipID uint16, payload []byte) []byte {
 	const ethLen = 14
+	const dot1qLen = 4
 	const ipLen = 20
 	const udpLen = 8
-	total := ethLen + ipLen + udpLen + len(payload)
+
+	tagLen := 0
+	if vlanID != 0 {
+		tagLen = dot1qLen
+	}
+	total := ethLen + tagLen + ipLen + udpLen + len(payload)
 	pkt := make([]byte, total)
 
-	// Ethernet header (14 bytes)
+	// Ethernet header (14 bytes): dst, src, EtherType-or-TPID
 	copy(pkt[0:6], dstMAC[:])
 	copy(pkt[6:12], srcMAC[:])
-	binary.BigEndian.PutUint16(pkt[12:14], ethPIP)
+	if vlanID != 0 {
+		binary.BigEndian.PutUint16(pkt[12:14], ethP8021Q)
+		// 802.1Q TCI: PCP (3) | DEI (1) | VID (12). PCP/DEI both 0;
+		// VID occupies the low 12 bits. Mask vlanID to be safe even
+		// though valid VIDs are 1–4094.
+		binary.BigEndian.PutUint16(pkt[14:16], vlanID&0x0fff)
+		binary.BigEndian.PutUint16(pkt[16:18], ethPIP)
+	} else {
+		binary.BigEndian.PutUint16(pkt[12:14], ethPIP)
+	}
 
-	// IP header (20 bytes, no options) — offset 14
+	// IP header (20 bytes, no options) — offset shifts by tagLen.
 	//
 	// TOS=0x00 and flags=0 (no DF) match RouterOS's own /tool mac-telnet
 	// wire format, verified against pcap. Upstream mactelnet-client uses
 	// TOS=0x10 + DF, but RouterOS itself doesn't — and "looks like the
 	// router doing it" is the safer pattern for traversing intermediate
 	// MikroTik switches with hardware-MAC-rule filtering.
-	ip := pkt[14:]
+	ipOff := ethLen + tagLen
+	ip := pkt[ipOff:]
 	ip[0] = 0x45                                            // version=4, IHL=5
 	ip[1] = 0x00                                            // TOS
 	binary.BigEndian.PutUint16(ip[2:4], uint16(ipLen+udpLen+len(payload)))
@@ -242,14 +498,14 @@ func buildFrame(srcMAC, dstMAC [6]byte, ipID uint16, payload []byte) []byte {
 	ip[16], ip[17], ip[18], ip[19] = 0xff, 0xff, 0xff, 0xff // dst IP
 	binary.BigEndian.PutUint16(ip[10:12], internetChecksum(ip[:ipLen]))
 
-	// UDP header (8 bytes) — offset 14 + 20 = 34
-	udp := pkt[34:]
+	// UDP header (8 bytes) — offset = ipOff + 20
+	udp := pkt[ipOff+ipLen:]
 	binary.BigEndian.PutUint16(udp[0:2], udpPort)                    // src port
 	binary.BigEndian.PutUint16(udp[2:4], udpPort)                    // dst port
 	binary.BigEndian.PutUint16(udp[4:6], uint16(udpLen+len(payload))) // UDP length
 	// udp[6:8] checksum = 0 (legal on IPv4 — receivers don't require it)
 
-	copy(pkt[42:], payload)
+	copy(pkt[ipOff+ipLen+udpLen:], payload)
 	return pkt
 }
 

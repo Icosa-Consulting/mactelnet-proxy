@@ -1,3 +1,37 @@
+mactelnet-proxy (0.2.0) stable; urgency=low
+
+  * 802.1Q VLAN tagging on the mac-telnet client and serve mode. New
+    `--vlan N` flag and `MACTELNET_PROXY_VLAN` env var (1–4094, 0 =
+    untagged) make the proxy emit and consume tagged Ethernet frames
+    natively. Required when running inside a RouterOS container whose
+    veth sits on a bridge with `vlan-filtering=yes` — RouterOS won't
+    pass non-veth interfaces (including VLAN sub-interfaces) into the
+    container's network namespace, so kernel auto-tag/strip via a
+    sub-iface is unavailable inside the container; application-side
+    tagging is the only path.
+  * Send path: `buildFrame` inserts a 4-byte 802.1Q tag (TPID 0x8100,
+    TCI = PCP|DEI|VID) between the source MAC and the EtherType when
+    vlanID > 0; offsets to IP/UDP shift accordingly.
+  * Receive path: when vlanID > 0 the kernel inside the container has
+    no UDP socket binding for tagged frames (no sub-interface), so we
+    drop the regular `net.UDPConn` listener and switch to AF_PACKET
+    SOCK_RAW with userspace parse of Ethernet + 802.1Q + IP + UDP,
+    filtering by VID + dst MAC + UDP/20561.
+  * Verified end-to-end against a RouterOS 7.21.4 device on RB5009
+    arm64 hardware: `socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP))`
+    succeeds in a stock container, broadcast UDP/MNDP works, and a
+    full mac-telnet session reaches the RouterOS prompt.
+  * Documentation: docs/MIKROTIK-CONTAINER-RESEARCH.md — comprehensive
+    reference on RouterOS container quirks, vetted by live tests on
+    7.21.4 / RB5009.
+  * Dockerfile.arm64 ships a commented-out RUN block with diagnostic
+    tools (strace, tcpdump, iproute2, iputils, bind-tools,
+    netcat-openbsd, lsof, mtr, mactelnet). Uncomment to build a debug
+    image; adds ~8 MB but pays off when triaging in-container packet
+    paths via `/container/shell`.
+
+ -- Icosa Consulting <build@icosa.consulting>  Sat, 02 May 2026 12:00:00 -0600
+
 mactelnet-proxy (0.1.9) stable; urgency=low
 
   * generalize deployment-specific examples in comments and Docker

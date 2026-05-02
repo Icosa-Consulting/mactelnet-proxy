@@ -7,6 +7,67 @@ versions follow SemVer. Per-tag summaries also live in
 
 ## Unreleased
 
+## [0.2.0] – 2026-05-02
+
+### Added
+- **802.1Q VLAN tagging on the mac-telnet client and serve mode.** New
+  `--vlan N` flag (and `MACTELNET_PROXY_VLAN` env on `serve`) makes the
+  proxy emit and consume tagged Ethernet frames natively. Required when
+  running inside a RouterOS container whose veth sits on a bridge with
+  `vlan-filtering=yes`: RouterOS does not pass non-veth interfaces
+  (including VLAN sub-interfaces) into the container's network namespace,
+  so kernel auto-tag/strip via a sub-interface — the way you'd handle
+  this on a regular Linux host — isn't available. Application-side
+  tagging is the only working path. Range 1–4094; 0 (default) means
+  untagged, identical to pre-0.2.0 behaviour.
+  - **Send path**: `buildFrame` inserts a 4-byte 802.1Q header (TPID
+    0x8100, TCI = PCP=0 | DEI=0 | VID) between source MAC and the
+    original EtherType when `vlanID > 0`. The `Sendto` outer protocol
+    on the AF_PACKET sockaddr switches from ETH_P_IP to ETH_P_8021Q
+    so the kernel dispatches the frame as tagged.
+  - **Receive path**: a new `rxConn` interface decouples the rxLoop
+    from the underlying socket type. The untagged path keeps using
+    `net.UDPConn` bound to `0.0.0.0:20561` (cheap kernel demux). The
+    VLAN path uses a new `rawReceiver` wrapping AF_PACKET SOCK_RAW
+    bound to the iface; it parses Ethernet + 802.1Q + IP + UDP in
+    userspace and filters on VID + dst MAC + UDP/20561 before handing
+    the payload up. Read deadlines map to `SO_RCVTIMEO`.
+  - **Wire format unchanged for vlanID=0** — all existing tests still
+    pass, no behaviour change for non-VLAN deployments.
+  - (`internal/mactelnet/conn.go`, `internal/mactelnet/session.go`,
+    `internal/mactelnet/loop.go`, `cmd/mactelnet-proxy/main.go`,
+    `cmd/mactelnet-proxy/mactelnet.go`, `internal/sshserver/server.go`,
+    `internal/sshserver/exec.go`, `internal/mactelnet/conn_test.go`)
+
+### Verified
+- **RouterOS 7.21.4 / RB5009 (arm64) container deployment confirmed
+  working.** `socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP))` succeeds in
+  a stock container, broadcast UDP works (MNDP discovery returns
+  neighbors), and a full mac-telnet session against a target on the
+  same L2 segment reaches the RouterOS prompt with auth, terminal I/O,
+  and clean disconnect. Across a vlan-filtered bridge the new `--vlan`
+  flag closes the L2 reachability gap.
+- **Single-stage Alpine arm64 images load directly via `/container/add
+  file=…`** with no skopeo conversion step. `docker buildx build
+  --platform linux/arm64 --output=type=docker` produces a tarball
+  RouterOS accepts as-is.
+
+### Docs
+- New `docs/MIKROTIK-CONTAINER-RESEARCH.md`: end-to-end reference on
+  RouterOS container architecture, networking model, capability
+  surface, vlan-filtering quirk (the netns-only-accepts-veth trap),
+  community pain points, deployment checklist for the proxy. Live-test
+  findings folded in alongside the original research-from-docs pass.
+
+### Build
+- `deploy/docker/Dockerfile.arm64` ships a commented-out RUN block
+  with in-container diagnostic tools (`strace`, `tcpdump`, `iproute2`,
+  `iputils`, `bind-tools`, `netcat-openbsd`, `lsof`, `mtr`, `mactelnet`).
+  Uncomment for a debug build; adds ~8 MB. Production builds stay
+  lean. Useful for `/container/shell`-based triage of L2 paths inside
+  RouterOS containers — `strace -fe socket,bind,setsockopt` against
+  the proxy was the workflow that nailed down the 0.2.0 verification.
+
 ## [0.1.9] – 2026-05-01
 
 ### Changed

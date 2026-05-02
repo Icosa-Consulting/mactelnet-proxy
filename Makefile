@@ -110,7 +110,7 @@ docker-all: docker-amd64 docker-arm64 docker-armhf
 deb:
 	@command -v dpkg-buildpackage >/dev/null || { echo "dpkg-buildpackage not found; apt install dpkg-dev"; exit 2; }
 	@if [ -z "$(DEB_GOARCH)" ]; then echo "unknown DEB_ARCH=$(DEB_ARCH); use amd64|arm64|armhf"; exit 2; fi
-	dpkg-buildpackage -b -uc -us --host-arch=$(DEB_ARCH) -d
+	dpkg-buildpackage -b -uc -us -tc --host-arch=$(DEB_ARCH) -d
 	@mkdir -p $(DIST_DIR)
 	@mv ../$(BIN_NAME)_*_$(DEB_ARCH).deb       $(DIST_DIR)/ 2>/dev/null || true
 	@mv ../$(BIN_NAME)_*_$(DEB_ARCH).buildinfo $(DIST_DIR)/ 2>/dev/null || true

@@ -42,10 +42,10 @@ func (s *Session) rxLoop() {
 		}
 
 		// Short read deadline so we re-check ctx periodically. Closing
-		// the conn from Close() also unblocks ReadFromUDP via ErrClosed.
+		// the conn from Close() also unblocks Read via ErrClosed.
 		_ = s.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 
-		n, raddr, err := s.conn.ReadFromUDP(buf)
+		n, err := s.conn.Read(buf)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			continue
 		}
@@ -61,8 +61,7 @@ func (s *Session) rxLoop() {
 			previewLen = 32
 		}
 		slog.Debug("mactelnet: rx datagram",
-			"from", raddr.String(), "len", n,
-			"head", hex.EncodeToString(buf[:previewLen]))
+			"len", n, "head", hex.EncodeToString(buf[:previewLen]))
 		if n < headerLen {
 			slog.Debug("mactelnet: rx dropped (short)", "len", n)
 			continue

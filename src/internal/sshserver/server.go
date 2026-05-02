@@ -31,13 +31,16 @@ const (
 // Config carries everything Server needs to come up. ListenAddr,
 // HostKeyPath, and AuthorizedKeys are required; Iface is the default
 // L2-facing interface the mactelnet engine will bind to when the exec
-// request doesn't override it; Logger is optional (defaults to
+// request doesn't override it. VlanID is the default 802.1Q VID for
+// emitted/accepted mac-telnet frames (1–4094, 0 = untagged); the exec
+// command may override it per-session. Logger is optional (defaults to
 // slog.Default()).
 type Config struct {
 	ListenAddr     string
 	HostKeyPath    string
 	AuthorizedKeys string
 	Iface          string
+	VlanID         uint16
 	Logger         *slog.Logger
 }
 

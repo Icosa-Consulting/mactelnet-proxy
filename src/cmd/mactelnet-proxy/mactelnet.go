@@ -33,6 +33,11 @@ func runMactelnet(args []string) int {
 	user := fs.String("u", "", "username (required)")
 	iface := fs.String("i", "", "network interface to bind, e.g. eth0 (required)")
 	pass := fs.String("p", "", "password (or set MACTELNET_PASSWORD)")
+	vlanID := fs.Uint("vlan", 0,
+		"802.1Q VLAN ID (1–4094) to tag emitted frames with; 0 = untagged. "+
+			"Required when running inside a RouterOS container whose veth "+
+			"sits on a vlan-filtered bridge — RouterOS has no kernel VLAN "+
+			"sub-interfaces, so the proxy must tag itself.")
 
 	fs.Usage = func() {
 		w := fs.Output()
@@ -52,6 +57,10 @@ func runMactelnet(args []string) int {
 		fs.Usage()
 		return 2
 	}
+	if *vlanID > 4094 {
+		fmt.Fprintln(os.Stderr, "mactelnet-proxy: -vlan must be in 1..4094 (or 0 for untagged)")
+		return 2
+	}
 
 	mac := fs.Arg(0)
 	password := *pass
@@ -68,7 +77,7 @@ func runMactelnet(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sess, err := mactelnet.Open(ctx, *iface, mac, *user, password, cols, rows)
+	sess, err := mactelnet.Open(ctx, *iface, mac, *user, password, cols, rows, uint16(*vlanID))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mactelnet-proxy: open: %v\n", err)
 		return 1
